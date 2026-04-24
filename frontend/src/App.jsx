@@ -11,36 +11,10 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const messagesEndRef = useRef(null);
   
-  // Speech Recognition Setup
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const recognition = useRef(null);
+  const mediaRecorder = useRef(null);
 
   useEffect(() => {
-    // Check backend health
     checkHealth();
-
-    if (SpeechRecognition) {
-      recognition.current = new SpeechRecognition();
-      recognition.current.continuous = false;
-      recognition.current.interimResults = false;
-      
-      recognition.current.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setInput(transcript);
-        setIsRecording(false);
-        // Automatically send after voice input
-        sendMessage(transcript);
-      };
-
-      recognition.current.onerror = (event) => {
-        console.error('Speech recognition error', event.error);
-        setIsRecording(false);
-      };
-
-      recognition.current.onend = () => {
-        setIsRecording(false);
-      };
-    }
   }, []);
 
   const checkHealth = async () => {
@@ -62,28 +36,95 @@ function App() {
 
   const speakText = (text) => {
     if ('speechSynthesis' in window) {
-      // Cancel any ongoing speech
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
-      // Optional: change voice or rate here
       window.speechSynthesis.speak(utterance);
     }
   };
 
-  const toggleRecording = () => {
+  const toggleRecording = async () => {
     if (isRecording) {
-      recognition.current?.stop();
+      mediaRecorder.current?.stop();
+      setIsRecording(false);
     } else {
-      setInput(''); // Clear input for new voice command
-      recognition.current?.start();
-      setIsRecording(true);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Request WebM format natively
+        mediaRecorder.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        setIsRecording(true);
+
+        const chunks = [];
+        mediaRecorder.current.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        mediaRecorder.current.onstop = () => {
+          // Send the recorded chunk array as a playable Blob
+          const audioBlob = new Blob(chunks, { type: 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          sendAudioMessage(audioBlob, audioUrl);
+          
+          // Stop all audio tracks
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.current.start();
+      } catch (err) {
+        console.error("Error accessing microphone", err);
+        setMessages(prev => [...prev, { id: Date.now(), type: 'ai', text: 'Error accessing microphone. Please allow permissions in your browser.' }]);
+      }
     }
   };
 
-  const sendMessage = async (textToSubmit = input) => {
+  const sendAudioMessage = async (audioBlob, audioUrl) => {
+    // Add user audio message to chat visually to show it's an actual voice mail
+    const msgId = Date.now();
+    setMessages(prev => [...prev, { 
+      id: msgId, 
+      type: 'user', 
+      isAudio: true,
+      audioUrl: audioUrl,
+      text: '🤖 Transcribing voice mail...' 
+    }]);
+    
+    setIsTyping(true);
+
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'voice_mail.webm');
+
+    try {
+      const res = await fetch('http://localhost:8000/api/chat/audio', {
+        method: 'POST',
+        body: formData
+      });
+      
+      const data = await res.json();
+      
+      if (data.response) {
+        // Replace "Transcribing" with what the AI actually heard
+        setMessages(prev => prev.map(msg => 
+          msg.id === msgId ? { ...msg, text: `"${data.transcript}"` } : msg
+        ));
+        
+        // Add AI response
+        setMessages(prev => [...prev, { id: Date.now() + 1, type: 'ai', text: data.response }]);
+        speakText(data.response);
+      } else {
+        setMessages(prev => [...prev, { id: Date.now() + 1, type: 'ai', text: 'Sorry, I encountered an error. ' + (data.error || '') }]);
+        setMessages(prev => prev.map(msg => 
+          msg.id === msgId ? { ...msg, text: `Failed to transcribe` } : msg
+        ));
+      }
+    } catch (error) {
+      setMessages(prev => [...prev, { id: Date.now() + 1, type: 'ai', text: 'Error connecting to backend.' }]);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const sendTextMessage = async (textToSubmit = input) => {
     if (!textToSubmit.trim()) return;
 
-    // Add user message to chat
     const newMsg = { id: Date.now(), type: 'user', text: textToSubmit };
     setMessages(prev => [...prev, newMsg]);
     setInput('');
@@ -100,27 +141,25 @@ function App() {
       
       if (data.response) {
         setMessages(prev => [...prev, { id: Date.now(), type: 'ai', text: data.response }]);
-        // Speak the response
         speakText(data.response);
       } else {
         setMessages(prev => [...prev, { id: Date.now(), type: 'ai', text: 'Sorry, I encountered an error. ' + (data.error || '') }]);
       }
     } catch (error) {
-      setMessages(prev => [...prev, { id: Date.now(), type: 'ai', text: 'Error: Could not connect to backend. Is the FastAPI server running?' }]);
+      setMessages(prev => [...prev, { id: Date.now(), type: 'ai', text: 'Error connecting to backend.' }]);
     } finally {
       setIsTyping(false);
     }
   };
 
   const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
-      sendMessage();
+    if (e.key === 'Enter' && !isRecording) {
+      sendTextMessage();
     }
   };
 
   return (
     <div className="app-container">
-      {/* Decorative background blur blobs */}
       <div className="blob blob-1"></div>
       <div className="blob blob-2"></div>
 
@@ -147,8 +186,13 @@ function App() {
 
       <div className="chat-container">
         {messages.map((msg) => (
-          <div key={msg.id} className={`message ${msg.type}`}>
-            {msg.text}
+          <div key={msg.id} className={`message ${msg.type} ${msg.isAudio ? 'audio-message' : ''}`}>
+             <div className="message-content">
+               {msg.text}
+               {msg.isAudio && msg.audioUrl && (
+                 <audio src={msg.audioUrl} controls className="audio-player" />
+               )}
+             </div>
           </div>
         ))}
         {isTyping && (
@@ -167,7 +211,7 @@ function App() {
         <button 
           className={`icon-button ${isRecording ? 'mic-active' : ''}`}
           onClick={toggleRecording}
-          title={isRecording ? "Stop recording" : "Speak"}
+          title={isRecording ? "Stop recording & Send" : "Record Voice Mail"}
         >
           {isRecording ? (
              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -183,12 +227,13 @@ function App() {
         </button>
         <input 
           type="text" 
-          placeholder="Type a message or use voice..." 
+          placeholder={isRecording ? "Recording Voice Mail... Click Square to send." : "Type a message or click Mic for voice mail..."} 
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyPress={handleKeyPress}
+          disabled={isRecording}
         />
-        <button className="icon-button primary" onClick={() => sendMessage()} title="Send">
+        <button className="icon-button primary" onClick={() => sendTextMessage()} title="Send Message">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"></line>
             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>

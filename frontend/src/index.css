@@ -280,3 +280,17 @@ input[type="text"]::placeholder {
   background: #8b5cf6;
   border-radius: 50%;
 }
+
+.audio-player {
+  margin-top: 8px;
+  max-width: 100%;
+  height: 40px;
+  outline: none;
+  border-radius: 20px;
+}
+
+.audio-message .message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
