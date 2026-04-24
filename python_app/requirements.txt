@@ -1,0 +1,4 @@
+gradio
+ollama
+faster-whisper
+gtts
